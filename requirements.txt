@@ -1,8 +1,8 @@
-streamlit==1.28.0
-streamlit-oauth==0.1.2
-opencv-python-headless==4.8.1.78
-numpy==1.24.3
-pandas==2.0.3
-plotly==5.17.0
-Pillow==10.0.0
-requests==2.31.0
+streamlit>=1.28.0
+streamlit-oauth>=0.1.3
+opencv-python-headless
+numpy
+pandas
+plotly
+Pillow
+requests
