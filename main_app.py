@@ -198,7 +198,7 @@ AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 REFRESH_TOKEN_URL = "https://oauth2.googleapis.com/token"
 REVOKE_TOKEN_URL = "https://oauth2.googleapis.com/revoke"
-REDIRECT_URI = "http://localhost:8501"
+REDIRECT_URI = "https://fabric-check-app.streamlit.app"
 
 # Admin emails
 ADMINS = ["santhoshwebworker@gmail.com", "e22cs003@shanmugha.edu.in"]
@@ -1013,8 +1013,9 @@ def user_dashboard():
         tab1, tab2, tab3 = st.tabs(["📷 Camera", "📱 Mobile", "📁 Upload"])
         captured_image = None
         
+        # FIXED: Mobile Camera Fix - Using file_uploader instead of camera_input
         with tab1:
-            camera = st.camera_input("Take a photo", key="webcam")
+            camera = st.file_uploader("📸 Take a photo using Camera", type=['jpg', 'jpeg', 'png'], key="webcam_mobile")
             if camera:
                 captured_image = Image.open(camera)
                 st.image(captured_image, caption="📸 Captured Image", use_column_width=True)
