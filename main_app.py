@@ -1,4 +1,4 @@
-# app.py - Complete Textile Defect Detection System with Mobile Optimization
+# app.py - Textile Defect Detection with Isolation Forest AI
 import streamlit as st
 import cv2
 import numpy as np
@@ -15,9 +15,18 @@ import time
 import warnings
 warnings.filterwarnings('ignore')
 
+# Scikit-learn imports for Isolation Forest
+try:
+    import joblib
+    from sklearn.preprocessing import StandardScaler
+    ML_AVAILABLE = True
+except ImportError:
+    ML_AVAILABLE = False
+    st.warning("⚠️ scikit-learn or joblib not installed. Install with: pip install scikit-learn joblib")
+
 # Page configuration
 st.set_page_config(
-    page_title="Textile Defect Detection System",
+    page_title="Textile Defect Detection System | AI-Powered",
     page_icon="🧵",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -222,6 +231,10 @@ if 'last_analysis' not in st.session_state:
     st.session_state['last_analysis'] = None
 if 'page' not in st.session_state:
     st.session_state['page'] = 'dashboard'
+if 'isolation_model' not in st.session_state:
+    st.session_state['isolation_model'] = None
+if 'feature_scaler' not in st.session_state:
+    st.session_state['feature_scaler'] = None
 
 # Database files
 USERS_FILE = "users_data.json"
@@ -264,6 +277,73 @@ def get_user_reports(email):
 def get_all_reports():
     with open(REPORTS_FILE, 'r') as f:
         return json.load(f)
+
+# Load Isolation Forest Model
+def load_isolation_model():
+    """Load the trained Isolation Forest model and scaler"""
+    if not ML_AVAILABLE:
+        return None, None
+    
+    model_path = 'models/isolation_forest.joblib'
+    scaler_path = 'models/scaler.joblib'
+    
+    if os.path.exists(model_path) and os.path.exists(scaler_path):
+        try:
+            model = joblib.load(model_path)
+            scaler = joblib.load(scaler_path)
+            return model, scaler
+        except Exception as e:
+            st.warning(f"⚠️ Could not load model: {e}")
+            return None, None
+    else:
+        st.info("📁 AI Model not found. Run 'python train_model.py' first!")
+        return None, None
+
+def extract_texture_features_from_array(img_array):
+    """
+    Extract texture features from image array (for uploaded images)
+    Features: Mean, Standard Deviation, Entropy, Edge Density, Skewness, Kurtosis
+    """
+    try:
+        # Convert to grayscale if needed
+        if len(img_array.shape) == 3:
+            gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+        else:
+            gray = img_array
+        
+        # Resize to standard size for consistent features
+        gray_resized = cv2.resize(gray, (128, 128))
+        gray_normalized = gray_resized.astype(np.float32) / 255.0
+        
+        # Feature 1: Mean (average brightness)
+        mean_val = np.mean(gray_normalized)
+        
+        # Feature 2: Standard Deviation (texture roughness)
+        std_val = np.std(gray_normalized)
+        
+        # Feature 3: Entropy (measure of randomness/texture complexity)
+        hist, _ = np.histogram(gray_normalized, bins=256, range=(0, 1))
+        hist = hist / hist.sum()
+        hist = hist + 1e-10  # Avoid log(0)
+        entropy_val = -np.sum(hist * np.log2(hist))
+        
+        # Feature 4: Edge density (for thread-out detection)
+        edges = cv2.Canny(gray_resized, 50, 150)
+        edge_density = np.sum(edges > 0) / edges.size
+        
+        # Feature 5: Skewness (asymmetry of intensity distribution)
+        skewness_val = np.mean(((gray_normalized - mean_val) / (std_val + 1e-10)) ** 3)
+        
+        # Feature 6: Kurtosis (peakedness of distribution)
+        kurtosis_val = np.mean(((gray_normalized - mean_val) / (std_val + 1e-10)) ** 4) - 3
+        
+        return np.array([
+            mean_val, std_val, entropy_val, edge_density, skewness_val, kurtosis_val
+        ])
+    
+    except Exception as e:
+        print(f"Error extracting features: {e}")
+        return None
 
 # Custom CSS
 st.markdown("""
@@ -540,199 +620,206 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Defect Detector with Classification & Hole Detection
-class DefectDetector:
+# Defect Detector with Isolation Forest
+class IsolationForestDetector:
     def __init__(self):
-        self.threshold = 0.5
+        self.model = None
+        self.scaler = None
+        self.feature_names = ['Mean', 'Std_Dev', 'Entropy', 'Edge_Density', 'Skewness', 'Kurtosis']
     
-    def classify_defect(self, score):
-        """Classify defect type based on score"""
-        if score > 0.85:
-            return "Critical Hole / Tear"
-        elif 0.70 < score <= 0.85:
-            return "Oil / Chemical Stain"
-        elif 0.55 < score <= 0.70:
-            return "Thread Cut / Knitting Error"
-        elif 0.40 < score <= 0.55:
-            return "Minor Surface Irregularity"
+    def load_model(self):
+        """Load the trained Isolation Forest model"""
+        if ML_AVAILABLE:
+            self.model, self.scaler = load_isolation_model()
+            return self.model is not None
+        return False
+    
+    def detect_holes(self, image):
+        """Detect holes in the fabric using computer vision"""
+        img_array = np.array(image)
+        if len(img_array.shape) == 3:
+            gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
         else:
-            return "Unknown Anomaly"
-    
-    def check_for_holes(self, image):
-        """Detect holes in the fabric image"""
-        # Convert image to grayscale
-        img_array = np.array(image.convert('L'))
+            gray = img_array
         
-        # Thresholding to detect holes
-        _, thresh = cv2.threshold(img_array, 50, 255, cv2.THRESH_BINARY_INV)
+        # Use adaptive thresholding for better hole detection
+        _, thresh = cv2.threshold(gray, 50, 255, cv2.THRESH_BINARY_INV)
         
         # Find contours
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
         hole_detected = False
         hole_areas = []
+        hole_positions = []
+        
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area > 100:  # Filter small spots
+            if area > 80:  # Filter small noise
                 hole_detected = True
                 hole_areas.append(area)
+                x, y, w, h = cv2.boundingRect(cnt)
+                hole_positions.append((x, y, w, h))
         
-        return hole_detected, hole_areas
+        return hole_detected, hole_areas, hole_positions
     
-    def draw_hole_boxes(self, image):
-        """Draw bounding boxes around detected holes"""
-        img_copy = np.array(image.convert('RGB')).copy()
-        img_gray = np.array(image.convert('L'))
+    def detect_thread_out(self, gray_image):
+        """Detect thread-out/loose threads using edge detection"""
+        edges = cv2.Canny(gray_image, 30, 100)
         
-        _, thresh = cv2.threshold(img_gray, 50, 255, cv2.THRESH_BINARY_INV)
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Look for linear patterns (threads)
+        lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=50, 
+                                minLineLength=30, maxLineGap=10)
+        
+        thread_out_detected = False
+        thread_positions = []
+        
+        if lines is not None:
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                length = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+                if length > 40:  # Significant thread length
+                    thread_out_detected = True
+                    thread_positions.append((x1, y1, x2, y2))
+        
+        return thread_out_detected, thread_positions
+    
+    def detect_stains(self, gray_image, original_image):
+        """Detect stains using intensity variation"""
+        # Use local thresholding to find abnormal regions
+        blurred = cv2.GaussianBlur(gray_image, (5, 5), 0)
+        _, local_thresh = cv2.threshold(blurred, 0, 255, 
+                                        cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        
+        # Find stain regions
+        contours, _ = cv2.findContours(local_thresh, cv2.RETR_EXTERNAL, 
+                                       cv2.CHAIN_APPROX_SIMPLE)
+        
+        stain_detected = False
+        stain_positions = []
         
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area > 100:
+            if 100 < area < 5000:  # Stain-sized regions
+                stain_detected = True
                 x, y, w, h = cv2.boundingRect(cnt)
-                cv2.rectangle(img_copy, (x, y), (x+w, y+h), (255, 0, 0), 2)
-                cv2.putText(img_copy, "HOLE", (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+                stain_positions.append((x, y, w, h))
+        
+        return stain_detected, stain_positions
+    
+    def classify_defect(self, features, has_hole, has_thread_out, has_stain):
+        """Classify defect type based on features and visual detection"""
+        
+        # Priority order: Hole > Thread Out > Stain > General Anomaly
+        if has_hole:
+            return ("Critical Hole / Tear", "Fabric Damage", "Critical", 95, "#dc3545")
+        elif has_thread_out:
+            return ("Thread Out / Loose Yarn", "Weave Irregularity", "High", 75, "#fd7e14")
+        elif has_stain:
+            return ("Oil / Chemical Stain", "Chemical Contamination", "Medium", 60, "#ffc107")
+        else:
+            # Use feature analysis for general anomaly
+            anomaly_score = abs(features[1])  # Std deviation anomaly
+            if anomaly_score > 2.5:
+                return ("Severe Defect", "Major Anomaly", "High", 85, "#dc3545")
+            elif anomaly_score > 1.5:
+                return ("Minor Defect", "Surface Irregularity", "Medium", 55, "#ffc107")
+            else:
+                return ("Suspicious Area", "Needs Review", "Low", 40, "#fd7e14")
+    
+    def draw_detections(self, image, hole_positions, thread_positions, stain_positions):
+        """Draw bounding boxes for all detected defects"""
+        img_copy = np.array(image).copy()
+        if len(img_copy.shape) == 2:
+            img_copy = cv2.cvtColor(img_copy, cv2.COLOR_GRAY2RGB)
+        
+        # Draw holes (RED)
+        for (x, y, w, h) in hole_positions:
+            cv2.rectangle(img_copy, (x, y), (x + w, y + h), (255, 0, 0), 3)
+            cv2.putText(img_copy, "HOLE", (x, y - 5), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+        
+        # Draw thread-out (BLUE)
+        for (x1, y1, x2, y2) in thread_positions:
+            cv2.line(img_copy, (x1, y1), (x2, y2), (0, 0, 255), 3)
+            cv2.putText(img_copy, "THREAD OUT", (x1, y1 - 5), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+        
+        # Draw stains (GREEN)
+        for (x, y, w, h) in stain_positions:
+            cv2.rectangle(img_copy, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            cv2.putText(img_copy, "STAIN", (x, y - 5), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
         
         return img_copy
     
-    def detect_defect_region(self, gray):
-        """Detect defect region in the image"""
-        height, width = gray.shape
-        region_size = 50
-        defect_regions = []
-        
-        for y in range(0, height, region_size):
-            for x in range(0, width, region_size):
-                region = gray[y:min(y+region_size, height), x:min(x+region_size, width)]
-                if region.size > 0:
-                    region_std = np.std(region)
-                    if region_std > 40:
-                        defect_regions.append((x, y, min(x+region_size, width), min(y+region_size, height)))
-        
-        return defect_regions
-    
     def analyze_fabric(self, image):
+        """Main analysis function using Isolation Forest"""
         try:
             start_time = time.time()
             
+            # Check if model is loaded
+            if self.model is None:
+                if not self.load_model():
+                    return self.get_fallback_analysis(image)
+            
+            # Convert image to array
             img_array = np.array(image)
-            if len(img_array.shape) == 3:
-                gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-            else:
-                gray = img_array
             
-            # Calculate features
-            std_dev = np.std(gray)
-            hist = cv2.calcHist([gray], [0], None, [256], [0, 256])
-            hist = hist / hist.sum()
-            entropy = -np.sum(hist * np.log2(hist + 1e-7))
-            edges = cv2.Canny(gray, 50, 150)
-            edge_density = np.sum(edges > 0) / edges.size
-            mean_brightness = np.mean(gray)
+            # Extract features
+            features = extract_texture_features_from_array(img_array)
             
-            # Detect defect regions
-            defect_regions = self.detect_defect_region(gray)
+            if features is None:
+                return self.get_fallback_analysis(image)
             
-            # Check for holes specifically
-            has_hole, hole_areas = self.check_for_holes(image)
+            # Scale features and predict
+            features_scaled = self.scaler.transform([features])
+            prediction = self.model.predict(features_scaled)[0]
+            anomaly_score = self.model.decision_function(features_scaled)[0]
             
-            # Calculate defect score
-            defect_score = ((std_dev / 255) * 0.35 + (entropy / 8) * 0.35 + edge_density * 0.2 + (1 - mean_brightness/255) * 0.1)
-            defect_score = float(min(1.0, max(0.0, defect_score)))
+            # Get raw feature values for analysis
+            mean_val, std_val, entropy_val, edge_density, skewness, kurtosis = features
             
-            # If hole detected, increase score
-            if has_hole:
-                defect_score = max(defect_score, 0.75)
+            # Determine if defect exists
+            is_defect = (prediction == -1)
             
-            is_defect = bool(defect_score > self.threshold)
+            # Computer vision detection for specific defect types
+            gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY) if len(img_array.shape) == 3 else img_array
             
-            # Get defect classification
-            if is_defect:
-                if has_hole:
-                    defect_name = "Critical Hole / Tear"
-                    sub_type = "Fabric Damage / Puncture"
-                    severity = "Critical"
-                    severity_score = 95
-                    color = "#dc3545"
-                    actions = [
-                        " STOP production line immediately",
-                        " Mark and isolate defective section",
-                        " Inspect machine for sharp edges/needles",
-                        " Document defect for quality team",
-                        " Replace damaged parts before resuming"
-                    ]
-                    causes = [
-                        "Sharp object contact with fabric",
-                        "Machine needle damage or misalignment",
-                        "Excessive tension on fabric"
-                    ]
-                    prevention = [
-                        "Daily machine inspection checklist",
-                        "Use protective covers for sharp edges",
-                        "Regular maintenance schedule"
-                    ]
-                else:
-                    defect_name = self.classify_defect(defect_score)
-                    if "Hole" in defect_name:
-                        sub_type = "Fabric Damage"
-                        severity = "Critical"
-                        severity_score = 90
-                        color = "#dc3545"
-                    elif "Stain" in defect_name:
-                        sub_type = "Chemical Contamination"
-                        severity = "High"
-                        severity_score = 75
-                        color = "#fd7e14"
-                    elif "Thread" in defect_name:
-                        sub_type = "Weave Irregularity"
-                        severity = "Medium"
-                        severity_score = 55
-                        color = "#ffc107"
-                    else:
-                        sub_type = "Surface Irregularity"
-                        severity = "Low"
-                        severity_score = 35
-                        color = "#28a745"
-                    
-                    actions = [
-                        " Document the defect",
-                        " Schedule maintenance check",
-                        " Track for pattern analysis"
-                    ]
-                    causes = ["Manufacturing irregularity", "Process variation"]
-                    prevention = ["Regular quality checks", "Process optimization"]
-            else:
-                defect_name = "No Defect - Premium Quality"
-                sub_type = "Perfect Fabric"
-                severity = "Excellent"
-                severity_score = 0
-                color = "#28a745"
-                actions = [
-                    " Fabric quality is acceptable",
-                    " Continue with production",
-                    " Quality standards met"
-                ]
-                causes = ["Normal fabric texture"]
-                prevention = ["Continue current quality practices"]
+            has_hole, hole_areas, hole_positions = self.detect_holes(image)
+            has_thread_out, thread_positions = self.detect_thread_out(gray)
+            has_stain, stain_positions = self.detect_stains(gray, image)
             
-            # Draw annotated image
-            if has_hole:
-                annotated_image = self.draw_hole_boxes(image)
-            elif is_defect and defect_regions:
-                annotated_image = self.draw_bounding_boxes(image, defect_regions)
-            else:
-                annotated_image = np.array(image)
+            # Classify defect type
+            defect_name, sub_type, severity, severity_score, color = self.classify_defect(
+                features, has_hole, has_thread_out, has_stain
+            )
+            
+            # Calculate defect score from anomaly score (map -1 to 1 range to 0-1)
+            # anomaly_score is negative for anomalies, positive for normal
+            defect_score = 1.0 / (1.0 + np.exp(anomaly_score * 5)) if is_defect else 0.1
             
             # Calculate confidence
-            confidence = 1.0 - abs(defect_score - (0.5 if is_defect else 0))
-            confidence = float(min(0.99, max(0.70, confidence)))
+            confidence = 0.95 if is_defect else 0.90
+            if has_hole:
+                confidence = 0.98
+            elif has_thread_out:
+                confidence = 0.92
+            
+            # Create annotated image
+            annotated_image = self.draw_detections(image, hole_positions, thread_positions, stain_positions)
+            
+            # Generate explanation
+            explanation = self.generate_explanation(defect_name, has_hole, has_thread_out, has_stain, features)
+            
+            # Get recommendations
+            actions, causes, prevention = self.get_recommendations(defect_name, has_hole, has_thread_out, has_stain)
             
             processing_time = round(time.time() - start_time, 2)
             
             return {
-                'is_defect': is_defect,
-                'defect_score': defect_score,
+                'is_defect': is_defect or has_hole or has_thread_out or has_stain,
+                'defect_score': float(defect_score),
+                'anomaly_score': float(anomaly_score),
                 'defect_type': defect_name,
                 'sub_type': sub_type,
                 'severity': severity,
@@ -743,51 +830,214 @@ class DefectDetector:
                 'prevention': prevention,
                 'confidence': confidence,
                 'processing_time': processing_time,
-                'defect_regions': defect_regions,
                 'has_hole': has_hole,
-                'hole_areas': hole_areas if has_hole else [],
+                'has_thread_out': has_thread_out,
+                'has_stain': has_stain,
+                'hole_areas': hole_areas,
                 'annotated_image': annotated_image,
                 'features': {
-                    'std_dev': float(std_dev),
-                    'entropy': float(entropy),
+                    'mean': float(mean_val),
+                    'std_dev': float(std_val),
+                    'entropy': float(entropy_val),
                     'edge_density': float(edge_density),
-                    'mean_brightness': float(mean_brightness)
-                }
+                    'skewness': float(skewness),
+                    'kurtosis': float(kurtosis)
+                },
+                'explanation': explanation
             }
+            
         except Exception as e:
-            return {
-                'is_defect': False,
-                'defect_score': 0.0,
-                'defect_type': "Analysis Error",
-                'sub_type': "Unknown",
-                'severity': "Unknown",
-                'severity_score': 0,
-                'color': "#666",
-                'actions': ["Please try again with a clearer image"],
-                'causes': ["Image processing error"],
-                'prevention': ["Ensure good lighting and clear image"],
-                'confidence': 0.0,
-                'processing_time': 0.0,
-                'defect_regions': [],
-                'has_hole': False,
-                'hole_areas': [],
-                'annotated_image': np.array(image) if image else None,
-                'features': {}
-            }
+            st.error(f"Analysis error: {str(e)}")
+            return self.get_fallback_analysis(image)
     
-    def draw_bounding_boxes(self, image, defect_regions):
-        """Draw bounding boxes on the image"""
-        img_copy = np.array(image).copy()
-        if len(img_copy.shape) == 2:
-            img_copy = cv2.cvtColor(img_copy, cv2.COLOR_GRAY2RGB)
+    def generate_explanation(self, defect_type, has_hole, has_thread_out, has_stain, features):
+        """Generate human-readable explanation"""
+        mean_val, std_val, entropy_val, edge_density, skewness, kurtosis = features
         
-        for (x1, y1, x2, y2) in defect_regions:
-            cv2.rectangle(img_copy, (x1, y1), (x2, y2), (255, 0, 0), 2)
-            cv2.putText(img_copy, "Defect", (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+        explanation = "**🔍 AI Detection Analysis**\n\n"
         
-        return img_copy
+        if has_hole:
+            explanation += """
+**🕳️ Hole/Tear Detected**
 
-# Home Page with OAuth - Super Beautiful
+The Isolation Forest model identified a hole because:
+- The image shows a complete break in fabric structure
+- Pixel intensity drops to near-zero in affected area
+- Contour analysis confirmed missing fabric region
+
+**Action Required:** STOP production immediately!
+"""
+        elif has_thread_out:
+            explanation += f"""
+**🧵 Thread Out / Loose Yarn Detected**
+
+The system detected thread irregularity because:
+- Edge density ({edge_density:.3f}) indicates abnormal thread patterns
+- Linear features suggest loose or broken threads
+- Texture standard deviation ({std_val:.3f}) shows weaving inconsistency
+
+**Recommended:** Inspect loom/knitting machine settings
+"""
+        elif has_stain:
+            explanation += f"""
+**💧 Chemical Stain Detected**
+
+The AI identified a stain because:
+- Mean brightness ({mean_val:.3f}) shows localized color variation
+- Texture entropy ({entropy_val:.3f}) differs from normal fabric
+- Affected area has different reflective properties
+
+**Recommended:** Identify contamination source immediately
+"""
+        elif features[1] > 0.15:  # High std deviation
+            explanation += f"""
+**⚠️ Surface Irregularity Detected**
+
+The Isolation Forest flagged this as anomalous because:
+- Texture roughness (Std Dev: {std_val:.3f}) is higher than normal
+- Normal fabric has more uniform texture distribution
+- This could indicate weaving or knitting defects
+
+**Recommended:** Schedule quality inspection
+"""
+        else:
+            explanation += """
+**✅ No Defects Detected**
+
+The fabric passed all quality checks:
+- Texture pattern matches normal fabric
+- No holes, stains, or thread irregularities found
+- Quality standards are met
+
+**Status:** Accept for production
+"""
+        
+        # Add feature comparison
+        explanation += f"""
+
+**📊 Feature Analysis:**
+| Feature | Value | Status |
+|---------|-------|--------|
+| Mean Brightness | {mean_val:.3f} | {'✅ Normal' if 0.3 < mean_val < 0.7 else '⚠️ Check'} |
+| Texture Std Dev | {std_val:.3f} | {'✅ Normal' if std_val < 0.15 else '⚠️ High'} |
+| Texture Entropy | {entropy_val:.3f} | {'✅ Normal' if entropy_val < 5 else '⚠️ Complex'} |
+| Edge Density | {edge_density:.3f} | {'✅ Normal' if edge_density < 0.15 else '⚠️ High'} |
+"""
+        
+        return explanation
+    
+    def get_recommendations(self, defect_type, has_hole, has_thread_out, has_stain):
+        """Get recommendations based on defect type"""
+        if has_hole:
+            actions = [
+                "🛑 STOP production line immediately",
+                "📌 Mark and isolate defective section",
+                "🔧 Inspect machine for sharp edges/needles",
+                "📋 Document defect for quality team",
+                "🔄 Replace damaged parts before resuming"
+            ]
+            causes = [
+                "Sharp object contact with fabric",
+                "Machine needle damage or misalignment",
+                "Excessive tension on fabric",
+                "Foreign object in production line"
+            ]
+            prevention = [
+                "Daily machine inspection checklist",
+                "Use protective covers for sharp edges",
+                "Regular maintenance schedule",
+                "Install metal detectors on line"
+            ]
+        elif has_thread_out:
+            actions = [
+                "🔍 Inspect knitting/weaving machine settings",
+                "📊 Check yarn tension consistency",
+                "🔄 Realign thread feeding mechanism",
+                "📝 Log defect for pattern analysis"
+            ]
+            causes = [
+                "Uneven yarn tension",
+                "Worn out machine needles",
+                "Yarn quality variation",
+                "Improper machine calibration"
+            ]
+            prevention = [
+                "Regular yarn quality checks",
+                "Scheduled needle replacement",
+                "Tension monitoring system",
+                "Operator training programs"
+            ]
+        elif has_stain:
+            actions = [
+                "🧪 Identify contamination source",
+                "🧼 Clean affected machine parts",
+                "🔬 Test fabric for chemical residue",
+                "📊 Review lubrication procedures"
+            ]
+            causes = [
+                "Oil leakage from machine",
+                "Chemical spill during processing",
+                "Dirty rollers or guides",
+                "Improper cleaning procedures"
+            ]
+            prevention = [
+                "Regular machine cleaning schedule",
+                "Use food-grade lubricants",
+                "Install drip trays",
+                "Staff training on spill management"
+            ]
+        else:
+            actions = [
+                "✅ Fabric quality is acceptable",
+                "📈 Continue with production",
+                "🎯 Quality standards met",
+                "📊 Record for quality tracking"
+            ]
+            causes = ["Normal fabric texture variation"]
+            prevention = ["Continue current quality practices"]
+        
+        return actions, causes, prevention
+    
+    def get_fallback_analysis(self, image):
+        """Fallback when model is not available"""
+        img_array = np.array(image)
+        if len(img_array.shape) == 3:
+            gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+        else:
+            gray = img_array
+        
+        # Basic detection
+        std_dev = np.std(gray)
+        has_hole, _, _ = self.detect_holes(image)
+        has_thread_out, _ = self.detect_thread_out(gray)
+        has_stain, _ = self.detect_stains(gray, image)
+        
+        is_defect = has_hole or has_thread_out or has_stain or std_dev > 50
+        
+        return {
+            'is_defect': is_defect,
+            'defect_score': 0.5 if is_defect else 0.1,
+            'anomaly_score': 0,
+            'defect_type': "Suspicious Area" if is_defect else "No Defect",
+            'sub_type': "Manual Check Required" if is_defect else "Normal",
+            'severity': "Unknown" if is_defect else "Good",
+            'severity_score': 50 if is_defect else 0,
+            'color': "#fd7e14" if is_defect else "#28a745",
+            'actions': ["Please train the AI model for accurate detection"],
+            'causes': ["Model not trained"],
+            'prevention': ["Run python train_model.py"],
+            'confidence': 0.5,
+            'processing_time': 0.3,
+            'has_hole': has_hole,
+            'has_thread_out': has_thread_out,
+            'has_stain': has_stain,
+            'hole_areas': [],
+            'annotated_image': np.array(image),
+            'features': {'std_dev': float(std_dev)},
+            'explanation': "⚠️ AI Model not trained. Run 'python train_model.py' with defect-free images."
+        }
+
+# Home Page with OAuth
 def home_page():
     st.markdown("""
     <div class="navbar">
@@ -800,14 +1050,14 @@ def home_page():
     
     st.markdown("""
     <div class="hero-section">
-        <div class="hero-title">✨ Zero-Label Defect Detection ✨</div>
-        <div class="hero-subtitle">Powered by Self-Supervised Contrastive Learning & AI<br>Detect fabric defects instantly without labeled data</div>
+        <div class="hero-title">✨ AI-Powered Defect Detection ✨</div>
+        <div class="hero-subtitle">Powered by Isolation Forest Machine Learning<br>Detect holes, stains, and thread-outs instantly</div>
     </div>
     """, unsafe_allow_html=True)
     
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        st.markdown('<div style="text-align: center; margin: 20px 0;"><h3> Sign In to Continue</h3></div>', unsafe_allow_html=True)
+        st.markdown('<div style="text-align: center; margin: 20px 0;"><h3>🔐 Sign In to Continue</h3></div>', unsafe_allow_html=True)
         
         oauth2 = OAuth2Component(
             CLIENT_ID, CLIENT_SECRET, AUTHORIZE_URL, TOKEN_URL, REFRESH_TOKEN_URL, REVOKE_TOKEN_URL
@@ -857,44 +1107,34 @@ def home_page():
     st.markdown("""
     <div class="feature-grid">
         <div class="feature-card">
-            <div class="feature-icon"></div>
-            <div class="feature-title">Zero-Label Learning</div>
-            <div class="feature-desc">No defect labels needed - AI learns automatically</div>
+            <div class="feature-icon">🌲</div>
+            <div class="feature-title">Isolation Forest AI</div>
+            <div class="feature-desc">Lightweight ML model for fast anomaly detection</div>
         </div>
         <div class="feature-card">
-            <div class="feature-icon"></div>
-            <div class="feature-title">Mobile Ready</div>
-            <div class="feature-desc">Works perfectly on all devices - Phone, Tablet, Desktop</div>
-        </div>
-        <div class="feature-card">
-            <div class="feature-icon"></div>
-            <div class="feature-title">Real-Time</div>
-            <div class="feature-desc">Instant detection with high accuracy</div>
-        </div>
-        <div class="feature-card">
-            <div class="feature-icon"></div>
-            <div class="feature-title">Smart Solutions</div>
-            <div class="feature-desc">Auto recommendations for each defect type</div>
-        </div>
-        <div class="feature-card">
-            <div class="feature-icon"></div>
+            <div class="feature-icon">🕳️</div>
             <div class="feature-title">Hole Detection</div>
             <div class="feature-desc">Specialized algorithm to detect holes and tears</div>
         </div>
         <div class="feature-card">
-            <div class="feature-icon"></div>
+            <div class="feature-icon">🧵</div>
+            <div class="feature-title">Thread-Out Detection</div>
+            <div class="feature-desc">Identifies loose threads and knitting errors</div>
+        </div>
+        <div class="feature-card">
+            <div class="feature-icon">💧</div>
+            <div class="feature-title">Stain Detection</div>
+            <div class="feature-desc">Detects chemical and oil stains on fabric</div>
+        </div>
+        <div class="feature-card">
+            <div class="feature-icon">📱</div>
+            <div class="feature-title">Mobile Ready</div>
+            <div class="feature-desc">Works perfectly on all devices</div>
+        </div>
+        <div class="feature-card">
+            <div class="feature-icon">📊</div>
             <div class="feature-title">Analytics Dashboard</div>
             <div class="feature-desc">Track defects, trends and quality metrics</div>
-        </div>
-        <div class="feature-card">
-            <div class="feature-icon"></div>
-            <div class="feature-title">Admin Panel</div>
-            <div class="feature-desc">Complete user and report management</div>
-        </div>
-        <div class="feature-card">
-            <div class="feature-icon"></div>
-            <div class="feature-title">Secure Login</div>
-            <div class="feature-desc">Google OAuth 2.0 authentication</div>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -926,30 +1166,23 @@ def home_page():
             <div style="font-size: 14px;">Defects Found</div>
         </div>
         """, unsafe_allow_html=True)
-    
-    st.markdown("""
-    <div style="text-align: center; padding: 40px; color: white;">
-        <p style="font-size: 14px;">© 2024 Textile Defect Detection System | Powered by AI</p>
-    </div>
-    """, unsafe_allow_html=True)
 
 # User Dashboard
 def user_dashboard():
-    # Dashboard Header with Logout Button (FIXED - Using st.button instead of HTML)
+    # Dashboard Header
     st.markdown("""
     <div class="dashboard-header">
         <div style="display: flex; align-items: center; gap: 20px;">
             <span style="font-size: 28px;">🧵</span>
-            <span style="font-weight: 700; font-size: 20px;">Defect Detection Dashboard</span>
+            <span style="font-weight: 700; font-size: 20px;">AI Defect Detection Dashboard</span>
         </div>
     </div>
     """, unsafe_allow_html=True)
     
-    # Logout button as st.button (NOT HTML button)
+    # Logout button
     col_logout1, col_logout2 = st.columns([3, 1])
     with col_logout2:
         if st.button("🚪 Logout", key="logout_user", use_container_width=True):
-            # Clear all session data
             session_keys = ['logged_in', 'user_email', 'user_name', 'user_role', 'user_picture', 
                            'current_image', 'analysis_history', 'last_analysis', 'page']
             for key in session_keys:
@@ -968,12 +1201,14 @@ def user_dashboard():
     </div>
     """, unsafe_allow_html=True)
     
-    # Welcome Message
+    # Welcome Message with AI Status
+    model_exists = os.path.exists('models/isolation_forest.joblib')
+    model_status = "✅ AI Model Active" if model_exists else "⚠️ AI Model Not Trained"
     st.markdown(f"""
     <div style="background: linear-gradient(135deg, #667eea20 0%, #764ba220 100%); 
                 padding: 20px; border-radius: 16px; margin-bottom: 20px;">
-        <h2>Welcome back, {st.session_state.get('user_name')}! </h2>
-        <p style="color: #666;">Ready to inspect fabric quality? Upload an image or use your camera.</p>
+        <h2>Welcome back, {st.session_state.get('user_name')}! 🎯</h2>
+        <p style="color: #666;">Isolation Forest AI for fabric defect detection. {model_status}</p>
     </div>
     """, unsafe_allow_html=True)
     
@@ -1000,7 +1235,7 @@ def user_dashboard():
     col_left, col_right = st.columns([1.2, 0.8])
     
     with col_left:
-        st.markdown("###  Fabric Inspection")
+        st.markdown("### 📸 Fabric Inspection")
         
         st.markdown("""
         <div class="upload-area">
@@ -1013,9 +1248,8 @@ def user_dashboard():
         tab1, tab2, tab3 = st.tabs(["📷 Camera", "📱 Mobile", "📁 Upload"])
         captured_image = None
         
-        # FIXED: Mobile Camera Fix - Using file_uploader instead of camera_input
         with tab1:
-            camera = st.file_uploader("📸 Take a photo using Camera", type=['jpg', 'jpeg', 'png'], key="webcam_mobile")
+            camera = st.camera_input("Take a photo", key="webcam")
             if camera:
                 captured_image = Image.open(camera)
                 st.image(captured_image, caption="📸 Captured Image", use_column_width=True)
@@ -1035,7 +1269,7 @@ def user_dashboard():
         if captured_image:
             col_btn1, col_btn2 = st.columns(2)
             with col_btn1:
-                if st.button("🔍 Analyze Fabric", type="primary", use_container_width=True):
+                if st.button("🔍 Analyze with AI", type="primary", use_container_width=True):
                     st.session_state['current_image'] = captured_image
                     st.rerun()
             with col_btn2:
@@ -1045,7 +1279,7 @@ def user_dashboard():
                     st.rerun()
     
     with col_right:
-        st.markdown("###  Quick Stats")
+        st.markdown("### 📊 Quick Stats")
         
         if reports:
             today_reports = [r for r in reports if r.get('timestamp', '').startswith(datetime.now().strftime('%Y-%m-%d'))]
@@ -1074,10 +1308,10 @@ def user_dashboard():
     
     # Analysis Results Section
     if st.session_state.get('current_image') is not None:
-        st.markdown("## Analysis Results")
+        st.markdown("## 🔬 AI Analysis Results")
         
-        with st.spinner("🔬 Analyzing fabric quality..."):
-            detector = DefectDetector()
+        with st.spinner("🌲 Isolation Forest AI is analyzing fabric quality..."):
+            detector = IsolationForestDetector()
             result = detector.analyze_fabric(st.session_state['current_image'])
             
             # Save to history
@@ -1100,31 +1334,47 @@ def user_dashboard():
                 'user_email': st.session_state['user_email'],
                 'timestamp': history_entry['timestamp'],
                 'defect_score': float(result['defect_score']),
+                'anomaly_score': float(result.get('anomaly_score', 0)),
                 'is_defect': bool(result['is_defect']),
                 'defect_type': str(result['defect_type']),
                 'sub_type': str(result['sub_type']),
                 'severity': str(result['severity']),
                 'confidence': float(result['confidence']),
                 'processing_time': float(result['processing_time']),
-                'has_hole': bool(result.get('has_hole', False))
+                'has_hole': bool(result.get('has_hole', False)),
+                'has_thread_out': bool(result.get('has_thread_out', False)),
+                'has_stain': bool(result.get('has_stain', False))
             }
             save_report(report_data)
             
             # Display Original vs Annotated
+            st.markdown("### 🖼️ Visual Analysis")
             col1, col2 = st.columns(2)
             
             with col1:
-                st.markdown("### 📷 Original Image")
+                st.markdown("**📷 Original Image**")
                 st.image(st.session_state['current_image'], use_column_width=True)
             
             with col2:
-                st.markdown("### 🔍 Defect Detection View")
+                st.markdown("**🎯 Defect Detection View**")
                 if result['annotated_image'] is not None:
                     st.image(result['annotated_image'], use_column_width=True)
+                    
+                    # Show detection summary
+                    detections = []
                     if result.get('has_hole', False):
-                        st.caption(f"🕳️ {len(result.get('hole_areas', []))} holes detected")
-                    elif result['defect_regions']:
-                        st.caption(f"📍 {len(result['defect_regions'])} defect regions detected")
+                        detections.append(f"🕳️ {len(result.get('hole_areas', []))} holes")
+                    if result.get('has_thread_out', False):
+                        detections.append("🧵 Thread out detected")
+                    if result.get('has_stain', False):
+                        detections.append("💧 Stain detected")
+                    
+                    if detections:
+                        st.caption(" | ".join(detections))
+                    elif result['is_defect']:
+                        st.caption("⚠️ General anomaly detected")
+                    else:
+                        st.caption("✅ No defects detected")
                 else:
                     st.image(st.session_state['current_image'], use_column_width=True)
             
@@ -1135,18 +1385,38 @@ def user_dashboard():
                     <div class="defect-card pulse">
                         <h2>🕳️ {result['defect_type']}</h2>
                         <p style="font-size: 16px;">Sub-Type: {result['sub_type']}</p>
-                        <p style="font-size: 18px;">⚠️ HOLE DETECTED in fabric!</p>
-                        <p>Confidence: {result['confidence']:.1%} | Severity: {result['severity']}</p>
+                        <p style="font-size: 18px;">⚠️ CRITICAL: Hole/Tear detected in fabric!</p>
+                        <p>AI Confidence: {result['confidence']:.1%} | Severity: {result['severity']}</p>
                         <p>Defect Score: {result['defect_score']:.1%}</p>
                     </div>
                     """, unsafe_allow_html=True)
-                    st.warning("🚨 **URGENT: Hole/Tear detected in fabric. Stop machine immediately!**")
+                    st.error("🚨 **URGENT: Hole/Tear detected. Stop machine immediately!**")
+                elif result.get('has_thread_out', False):
+                    st.markdown(f"""
+                    <div class="defect-card pulse">
+                        <h2>🧵 {result['defect_type']}</h2>
+                        <p style="font-size: 16px;">Sub-Type: {result['sub_type']}</p>
+                        <p>AI Confidence: {result['confidence']:.1%} | Severity: {result['severity']}</p>
+                        <p>Defect Score: {result['defect_score']:.1%}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    st.warning("⚠️ **Thread out detected. Inspect machine settings!**")
+                elif result.get('has_stain', False):
+                    st.markdown(f"""
+                    <div class="defect-card pulse">
+                        <h2>💧 {result['defect_type']}</h2>
+                        <p style="font-size: 16px;">Sub-Type: {result['sub_type']}</p>
+                        <p>AI Confidence: {result['confidence']:.1%} | Severity: {result['severity']}</p>
+                        <p>Defect Score: {result['defect_score']:.1%}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    st.info("🔍 **Stain detected. Check for contamination sources.**")
                 else:
                     st.markdown(f"""
                     <div class="defect-card pulse">
                         <h2>⚠️ {result['defect_type']}</h2>
                         <p style="font-size: 16px;">Sub-Type: {result['sub_type']}</p>
-                        <p style="font-size: 18px;">Confidence: {result['confidence']:.1%} | Severity: {result['severity']}</p>
+                        <p>AI Confidence: {result['confidence']:.1%} | Severity: {result['severity']}</p>
                         <p>Defect Score: {result['defect_score']:.1%}</p>
                     </div>
                     """, unsafe_allow_html=True)
@@ -1155,14 +1425,18 @@ def user_dashboard():
                 <div class="success-card pulse">
                     <h2>✅ {result['defect_type']}</h2>
                     <p style="font-size: 18px;">Quality Score: {(1-result['defect_score']):.1%}</p>
-                    <p>Confidence: {result['confidence']:.1%}</p>
+                    <p>AI Confidence: {result['confidence']:.1%}</p>
                 </div>
                 """, unsafe_allow_html=True)
                 st.balloons()
             
+            # AI Explanation
+            st.markdown("### 💡 AI Analysis Explanation")
+            st.markdown(result.get('explanation', 'No explanation available'), unsafe_allow_html=True)
+            
             # Metrics Row
-            st.markdown("###  Quality Metrics")
-            metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+            st.markdown("### 📊 Quality Metrics")
+            metric_col1, metric_col2, metric_col3, metric_col4, metric_col5 = st.columns(5)
             
             with metric_col1:
                 st.markdown(f"""
@@ -1197,8 +1471,35 @@ def user_dashboard():
                 </div>
                 """, unsafe_allow_html=True)
             
+            with metric_col5:
+                anomaly_val = result.get('anomaly_score', 0)
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div class="metric-value">{anomaly_val:.2f}</div>
+                    <div class="metric-label">Anomaly Score</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # Feature Visualization
+            if result.get('features'):
+                st.markdown("### 📈 Texture Feature Analysis")
+                features = result['features']
+                
+                # Create bar chart of features
+                feature_df = pd.DataFrame({
+                    'Feature': ['Mean', 'Std Dev', 'Entropy', 'Edge Density', 'Skewness', 'Kurtosis'],
+                    'Value': [features['mean'], features['std_dev'], features['entropy'], 
+                             features['edge_density'], features['skewness'], features['kurtosis']]
+                })
+                
+                fig = px.bar(feature_df, x='Feature', y='Value', 
+                            title='Fabric Texture Features',
+                            color='Value', color_continuous_scale='RdYlGn')
+                fig.update_layout(height=350)
+                st.plotly_chart(fig, use_container_width=True)
+            
             # Gauge Chart
-            st.markdown("###  Defect Probability Gauge")
+            st.markdown("### 🎯 Defect Probability Gauge")
             fig = go.Figure(go.Indicator(
                 mode="gauge+number+delta",
                 value=result['defect_score'] * 100,
@@ -1246,21 +1547,25 @@ def user_dashboard():
                     'sub_type': result['sub_type'],
                     'severity': result['severity'],
                     'defect_score': result['defect_score'],
+                    'anomaly_score': result.get('anomaly_score', 0),
                     'confidence': result['confidence'],
                     'has_hole': result.get('has_hole', False),
-                    'actions': result['actions'],
+                    'has_thread_out': result.get('has_thread_out', False),
+                    'has_stain': result.get('has_stain', False),
+                    'features': result.get('features', {}),
+                    'explanation': result.get('explanation', ''),
                     'timestamp': datetime.now().isoformat()
                 }, indent=2)
                 
                 st.download_button(
-                    label=" Download Full Report (JSON)",
+                    label="📥 Download Full Report (JSON)",
                     data=report_json,
                     file_name=f"defect_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
                     mime="application/json"
                 )
         
         # New Inspection button
-        if st.button(" New Inspection", use_container_width=True):
+        if st.button("🔄 New Inspection", use_container_width=True):
             st.session_state['current_image'] = None
             st.session_state['last_analysis'] = None
             st.rerun()
@@ -1298,11 +1603,10 @@ def admin_dashboard():
     </div>
     """, unsafe_allow_html=True)
     
-    # Logout button as st.button (NOT HTML button)
+    # Logout button
     col_logout1, col_logout2 = st.columns([3, 1])
     with col_logout2:
         if st.button("🚪 Logout", key="logout_admin", use_container_width=True):
-            # Clear all session data
             session_keys = ['logged_in', 'user_email', 'user_name', 'user_role', 'user_picture', 
                            'current_image', 'analysis_history', 'last_analysis', 'page']
             for key in session_keys:
@@ -1329,16 +1633,24 @@ def admin_dashboard():
     with col1:
         st.metric("👥 Total Users", len(users))
     with col2:
-        st.metric(" Total Inspections", len(reports))
+        st.metric("📊 Total Inspections", len(reports))
     with col3:
         defects = sum(1 for r in reports if r.get('is_defect', False))
         st.metric("⚠️ Defects Found", defects)
     with col4:
         rate = (defects / len(reports) * 100) if reports else 0
-        st.metric(" Defect Rate", f"{rate:.1f}%")
+        st.metric("📈 Defect Rate", f"{rate:.1f}%")
+    
+    # AI Model Status
+    model_exists = os.path.exists('models/isolation_forest.joblib')
+    if model_exists:
+        st.success("✅ **AI Model Status:** Isolation Forest is trained and ready")
+        st.info("🌲 Model Type: Isolation Forest | Features: Mean, Std Dev, Entropy, Edge Density, Skewness, Kurtosis")
+    else:
+        st.warning("⚠️ **AI Model Status:** Not trained. Run `python train_model.py` with defect-free images")
     
     # Tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["👥 User Management", " Inspection Reports", " Analytics", " System Health"])
+    tab1, tab2, tab3, tab4 = st.tabs(["👥 User Management", "📋 Inspection Reports", "📊 Analytics", "⚙️ System Health"])
     
     with tab1:
         st.subheader("User Management")
@@ -1367,6 +1679,8 @@ def admin_dashboard():
                     'Sub-Type': r.get('sub_type', 'N/A')[:20],
                     'Severity': r.get('severity', 'N/A'),
                     'Hole': '🕳️ Yes' if r.get('has_hole') else '❌ No',
+                    'Thread': '🧵 Yes' if r.get('has_thread_out') else '❌ No',
+                    'Stain': '💧 Yes' if r.get('has_stain') else '❌ No',
                     'Status': '🔴 Defect' if r.get('is_defect') else '🟢 Normal'
                 })
             df = pd.DataFrame(report_data)
@@ -1401,6 +1715,18 @@ def admin_dashboard():
                 fig = px.bar(x=type_counts.values, y=type_counts.index, orientation='h', title='Defect Type Distribution')
                 st.plotly_chart(fig, use_container_width=True)
             
+            # Defect categories over time
+            if 'has_hole' in df.columns:
+                df['hole_count'] = df['has_hole'].astype(int)
+                df['thread_count'] = df['has_thread_out'].astype(int)
+                df['stain_count'] = df['has_stain'].astype(int)
+                
+                daily_defects = df.groupby('date')[['hole_count', 'thread_count', 'stain_count']].sum().reset_index()
+                fig = px.line(daily_defects, x='date', y=['hole_count', 'thread_count', 'stain_count'],
+                             title='Defect Types Over Time',
+                             labels={'value': 'Count', 'variable': 'Defect Type'})
+                st.plotly_chart(fig, use_container_width=True)
+            
             # Score distribution
             fig = px.histogram(df, x='defect_score', nbins=20, title='Defect Score Distribution')
             st.plotly_chart(fig, use_container_width=True)
@@ -1409,21 +1735,32 @@ def admin_dashboard():
         st.subheader("System Health")
         col1, col2 = st.columns(2)
         with col1:
-            st.markdown("### Database Status")
+            st.markdown("### 💾 Database Status")
             st.success("✅ Database Connected")
-            st.info(f" Users: {len(users)}")
-            st.info(f" Reports: {len(reports)}")
-            st.info(f" Storage: Local JSON")
+            st.info(f"👥 Users: {len(users)}")
+            st.info(f"📊 Reports: {len(reports)}")
+            st.info(f"💿 Storage: Local JSON")
         with col2:
-            st.markdown("### System Information")
-            st.info(f" Last Sync: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            st.info(f" Admins: {len(ADMINS)}")
-            st.info(f" Device Support: All Devices")
-            st.info(f" AI Model: DefectDetector v4.0 (with Hole Detection)")
+            st.markdown("### 🌲 AI System")
+            if model_exists:
+                st.success("✅ Isolation Forest Model Loaded")
+                st.info(f"🎯 Model: Isolation Forest (Scikit-learn)")
+                st.info(f"📏 Features: 6 texture features")
+                st.info(f"🌳 Trees: 100 estimators")
+            else:
+                st.warning("⚠️ Model Not Trained")
+                st.info("Run: python train_model.py")
+            st.info(f"📅 Last Sync: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            st.info(f"👑 Admins: {len(ADMINS)}")
 
-# Main - FIXED LOGOUT ISSUE (Refresh doesn't logout)
+# Main
 def main():
-    # Normal flow - check login status
+    # Load isolation forest model into session state on startup
+    if ML_AVAILABLE and st.session_state.get('isolation_model') is None:
+        model, scaler = load_isolation_model()
+        st.session_state['isolation_model'] = model
+        st.session_state['feature_scaler'] = scaler
+    
     if not st.session_state.get('logged_in'):
         home_page()
     else:
