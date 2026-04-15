@@ -1,8 +1,12 @@
-streamlit>=1.28.0
-streamlit-oauth>=0.1.3
-opencv-python-headless
+streamlit
+streamlit-oauth
+opencv-python
 numpy
 pandas
 plotly
 Pillow
 requests
+scikit-learn
+joblib
+matplotlib
+scikit-learn
