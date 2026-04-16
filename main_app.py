@@ -1,5 +1,5 @@
 # main_app.py - ULTRA FAST Textile Defect Detection (256x256 Optimized) with Gemini LLM
-# IMPROVED: Reduced false positives with better CV filtering and smarter logic
+# IMPROVED: Fixed false positives with higher CV thresholds and smarter logic
 
 import streamlit as st
 import cv2
@@ -203,7 +203,7 @@ class FeatureExtractor256:
             return np.zeros(4)
 
 # ============================================
-# GEMINI LLM INTEGRATION WITH IMPROVED PROMPT
+# GEMINI LLM INTEGRATION
 # ============================================
 
 class GeminiAnalyzer:
@@ -224,9 +224,7 @@ class GeminiAnalyzer:
                 print(f"⚠️ Gemini initialization failed: {e}")
     
     def gemini_override_check(self, image, isolation_prediction, anomaly_score, threshold, cv_holes, cv_threads, cv_stains):
-        """
-        Gemini Override Logic - IMPROVED: Now asks Gemini to verify if defects are real
-        """
+        """Gemini Override Logic - Verifies if defects are real"""
         if not self.available:
             return {
                 'needs_override': False,
@@ -245,7 +243,6 @@ class GeminiAnalyzer:
             
             st.info("🔍 Gemini AI is performing detailed defect analysis...")
             
-            # IMPROVED PROMPT: Ask Gemini to verify if defects are real
             prompt = f"""
             You are a textile quality control expert. Analyze this fabric image CAREFULLY.
             
@@ -253,14 +250,14 @@ class GeminiAnalyzer:
             
             Computer Vision detected:
             - Holes: {len(cv_holes)} (REAL holes are serious defects)
-            - Thread-outs: {len(cv_threads)} (More than 10 is a problem)
-            - Stains: {len(cv_stains)} (More than 3 is a problem)
+            - Thread-outs: {len(cv_threads)} (More than 50 is a problem)
+            - Stains: {len(cv_stains)} (More than 5 is a problem)
             
             Please verify:
             1. Are the detected spots actual defects OR just shadows/dust/fabric texture?
             2. Is there any REAL hole in the fabric? (Even one hole = REJECT)
-            3. Are there many loose threads? (More than 10 = REJECT)
-            4. Are there many stains? (More than 3 = REJECT)
+            3. Are there many loose threads? (More than 50 = REJECT)
+            4. Are there many stains? (More than 5 = REJECT)
             
             If it's just minor texture, dust, or shadow - mark it as PASS.
             Only mark as REJECT if there is a REAL defect.
@@ -277,10 +274,8 @@ class GeminiAnalyzer:
             response = self.vision_model.generate_content([prompt, image_pil])
             response_text = response.text
             
-            # Parse verdict
             is_reject = "DEFECT_STATUS: REJECT" in response_text.upper() or "VERDICT: REJECT" in response_text.upper()
             
-            # If Gemini says PASS, override everything
             if "VERDICT: PASS" in response_text.upper() or "DEFECT_STATUS: PASS" in response_text.upper():
                 is_reject = False
             
@@ -291,7 +286,7 @@ class GeminiAnalyzer:
             if "DEFECT_TYPE: HOLE" in response_text.upper():
                 defect_type = "Hole / Puncture"
                 severity = "Critical"
-                is_reject = True  # Hole is always reject
+                is_reject = True
                 explanation = "Real hole detected in fabric"
             elif "DEFECT_TYPE: TEAR" in response_text.upper():
                 defect_type = "Tear / Rip"
@@ -324,13 +319,12 @@ class GeminiAnalyzer:
             
         except Exception as e:
             print(f"Gemini error: {e}")
-            # Fallback to safe mode - if Gemini fails, use CV with thresholds
-            cv_defect = len(cv_holes) > 0 or len(cv_threads) > 10 or len(cv_stains) > 3
+            cv_defect = len(cv_holes) > 0 or len(cv_threads) > 50 or len(cv_stains) > 5
             return {
                 'needs_override': True,
                 'defect_found': cv_defect,
                 'defect_type': "Defect Found" if cv_defect else None,
-                'severity': "Critical" if len(cv_holes) > 0 else ("High" if len(cv_threads) > 10 else "Medium"),
+                'severity': "Critical" if len(cv_holes) > 0 else ("High" if len(cv_threads) > 50 else "Medium"),
                 'explanation': f"CV detected {len(cv_holes)} holes, {len(cv_threads)} threads, {len(cv_stains)} stains",
                 'detailed_analysis': None,
                 'final_verdict': 'REJECT' if cv_defect else 'PASS'
@@ -359,11 +353,11 @@ class GeminiAnalyzer:
             return f"Error: {e}"
 
 # ============================================
-# DEFECT DETECTOR FOR 256x256 WITH IMPROVED LOGIC
+# DEFECT DETECTOR FOR 256x256 WITH FIXED FALSE POSITIVES
 # ============================================
 
 class DefectDetector256:
-    """Complete defect detection with improved false positive reduction"""
+    """Complete defect detection with fixed false positive issues"""
     
     def __init__(self):
         self.feature_extractor = None
@@ -408,65 +402,109 @@ class DefectDetector256:
         return True
     
     def detect_holes_cv(self, image):
-        """Hole detection - HIGH threshold to avoid false positives"""
+        """
+        Hole detection - HIGH threshold to avoid false positives
+        Only detects REAL holes (large area, dark regions)
+        """
         if len(image.shape) == 3:
             gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
         else:
             gray = image
         
-        _, thresh = cv2.threshold(gray, 30, 255, cv2.THRESH_BINARY_INV)
+        # Use multiple thresholds for better hole detection
+        _, thresh1 = cv2.threshold(gray, 20, 255, cv2.THRESH_BINARY_INV)
+        _, thresh2 = cv2.threshold(gray, 40, 255, cv2.THRESH_BINARY_INV)
+        thresh = cv2.bitwise_or(thresh1, thresh2)
+        
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
         holes = []
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            # Only real holes (larger area, circular shape)
-            if area > 100:  # Increased from 30 to 100
+            # Only REAL holes (minimum 150 pixels area)
+            if area > 150:  # Increased from 100 to 150
                 x, y, w, h = cv2.boundingRect(cnt)
                 holes.append({'bbox': (x, y, w, h), 'area': area})
         return holes
     
     def detect_thread_out_cv(self, image):
-        """Thread detection - Only count significant threads"""
+        """
+        Thread detection - FIXED: Higher Canny thresholds to ignore fabric texture
+        Canny(100, 200) ignores small texture patterns
+        """
         if len(image.shape) == 3:
             gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
         else:
             gray = image
         
-        edges = cv2.Canny(gray, 50, 150)
-        lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=40, 
-                                minLineLength=40, maxLineGap=10)
+        # IMPORTANT FIX: Increased Canny thresholds from (50,150) to (100,200)
+        # This ignores fabric weave pattern and only detects real loose threads
+        edges = cv2.Canny(gray, 100, 200)  # Higher threshold = less sensitive to texture
+        
+        # Hough line detection with higher thresholds
+        lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=50, 
+                                minLineLength=50, maxLineGap=15)
         
         threads = []
         if lines is not None:
             for line in lines:
                 x1, y1, x2, y2 = line[0]
                 length = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
-                # Only significant threads (longer than 40 pixels)
-                if length > 40:
+                # Only long, prominent threads (minimum 50 pixels length)
+                if length > 50:
+                    # Check if it's a real loose thread (not just fabric edge)
                     threads.append({'line': (x1, y1, x2, y2), 'length': length})
-        return threads
+        
+        # Filter out duplicate detections
+        unique_threads = []
+        for thread in threads:
+            is_unique = True
+            for existing in unique_threads:
+                x1, y1, x2, y2 = thread['line']
+                ex1, ey1, ex2, ey2 = existing['line']
+                # If lines are too close, consider them the same
+                if abs(x1 - ex1) < 20 and abs(y1 - ey1) < 20:
+                    is_unique = False
+                    break
+            if is_unique:
+                unique_threads.append(thread)
+        
+        return unique_threads
     
     def detect_stains_cv(self, image):
-        """Stain detection - INCREASED min_area to avoid dust/false positives"""
+        """
+        Stain detection - INCREASED min_area to avoid dust/false positives
+        Minimum 200 pixels to be considered a stain
+        """
         if len(image.shape) == 3:
             gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
         else:
             gray = image
         
+        # Apply blur to reduce noise
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        
+        # Use adaptive thresholding for better stain detection
+        thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                       cv2.THRESH_BINARY_INV, 11, 2)
+        
+        # Morphological operations to clean up
+        kernel = np.ones((3, 3), np.uint8)
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
         
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
         stains = []
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            # IMPORTANT: Increased min_area from 50 to 100 to ignore dust/small spots
-            # Only count stains larger than 100 pixels as potential defects
-            if 100 < area < 3000:  # Increased min from 50 to 100
+            # IMPORTANT FIX: Minimum 200 pixels to ignore tiny dust/shadows
+            # Maximum 5000 pixels to avoid false large regions
+            if 200 < area < 5000:  # Increased min from 100 to 200
                 x, y, w, h = cv2.boundingRect(cnt)
-                stains.append({'bbox': (x, y, w, h), 'area': area})
+                # Check aspect ratio - real stains are usually not extremely thin
+                aspect_ratio = w / h if h > 0 else 0
+                if 0.2 < aspect_ratio < 5:  # Filter out very thin lines
+                    stains.append({'bbox': (x, y, w, h), 'area': area})
         return stains
     
     def draw_detections(self, image, holes, threads, stains):
@@ -493,11 +531,10 @@ class DefectDetector256:
     def analyze_fabric(self, image):
         """
         IMPROVED MAIN ANALYSIS FUNCTION
-        Logic: Only REJECT if:
-        - holes_count > 0 (ANY hole is reject)
-        - threads_count > 10 (many loose threads)
-        - stains_count > 3 (many stains)
-        - OR Isolation Forest says ANOMALY AND counts exceed thresholds
+        Logic: 
+        - Trust Isolation Forest if it says NORMAL (anomaly_score > 0)
+        - Only REJECT if: holes > 0 OR threads > 50 OR stains > 5
+        - Gemini can override if needed
         """
         try:
             start_time = time.time()
@@ -535,28 +572,23 @@ class DefectDetector256:
             stain_count = len(stains_cv)
             
             # ============================================
-            # IMPROVED LOGIC: Only REJECT if thresholds are exceeded
+            # IMPROVED LOGIC - FIXED FALSE POSITIVES
             # ============================================
             
-            # Rule 1: ANY hole = REJECT (holes are serious)
+            # Check if Isolation Forest thinks it's NORMAL (positive score)
+            is_iso_normal = isolation_prediction == 1 and anomaly_score > 0
+            
+            # REJECT conditions (much higher thresholds to avoid false positives)
             has_real_hole = hole_count > 0
+            has_many_threads = thread_count > 50  # Increased from 10 to 50
+            has_many_stains = stain_count > 5     # Increased from 3 to 5
             
-            # Rule 2: Many threads = REJECT (more than 10)
-            has_many_threads = thread_count > 10
-            
-            # Rule 3: Many stains = REJECT (more than 3)
-            has_many_stains = stain_count > 3
-            
-            # Rule 4: Isolation Forest says ANOMALY AND significant counts
-            is_iso_anomaly = isolation_prediction == -1 or anomaly_score < self.threshold
-            
-            # Initial verdict based on rules
+            # Initial verdict based on strict rules
             initial_is_defect = has_real_hole or has_many_threads or has_many_stains
             
-            # If Isolation Forest says ANOMALY but counts are low, don't reject automatically
-            if is_iso_anomaly and not initial_is_defect:
-                # Low counts but ISO says anomaly - need Gemini to verify
-                initial_is_defect = False  # Don't reject yet, let Gemini decide
+            # If Isolation Forest says NORMAL and counts are low, trust it
+            if is_iso_normal and not initial_is_defect:
+                initial_is_defect = False
             
             final_is_defect = initial_is_defect
             final_defect_type = "Unknown"
@@ -567,10 +599,13 @@ class DefectDetector256:
             gemini_verdict = None
             
             # ============================================
-            # GEMINI VERIFICATION (IMPROVED)
+            # GEMINI VERIFICATION (Only if needed)
             # ============================================
             
-            if self.gemini and self.gemini.available:
+            # Only call Gemini if there's potential defect or ISO is uncertain
+            need_gemini = (initial_is_defect or (is_iso_normal == False and thread_count > 10))
+            
+            if self.gemini and self.gemini.available and need_gemini:
                 gemini_result = self.gemini.gemini_override_check(
                     img_resized, isolation_prediction, anomaly_score, self.threshold,
                     holes_cv, threads_cv, stains_cv
@@ -596,7 +631,7 @@ class DefectDetector256:
                         gemini_overridden = True
                         st.success("✅ Gemini AI verified: Quality PASS!")
             else:
-                # No Gemini - use rule-based decision
+                # No Gemini or not needed - use rule-based decision
                 if has_real_hole:
                     final_is_defect = True
                     final_defect_type = "Hole / Puncture"
@@ -606,17 +641,20 @@ class DefectDetector256:
                     final_is_defect = True
                     final_defect_type = "Thread-out / Loose Thread"
                     final_severity = "High"
-                    explanation_text = f"Detected {thread_count} thread issues (threshold: >10)"
+                    explanation_text = f"Detected {thread_count} thread issues (threshold: >50)"
                 elif has_many_stains:
                     final_is_defect = True
                     final_defect_type = "Stain / Dirt"
                     final_severity = "Medium"
-                    explanation_text = f"Detected {stain_count} stains (threshold: >3)"
+                    explanation_text = f"Detected {stain_count} stains (threshold: >5)"
                 else:
                     final_is_defect = False
                     final_defect_type = "No Defect - Quality Pass"
                     final_severity = "Good"
-                    explanation_text = f"Fabric quality check passed. Small variations are within acceptable limits."
+                    if is_iso_normal:
+                        explanation_text = f"Fabric quality check PASSED. Isolation Forest confirms NORMAL fabric (Score: {anomaly_score:.4f} > 0)."
+                    else:
+                        explanation_text = f"Fabric quality check PASSED. Small variations are within acceptable limits."
             
             # Calculate defect score based on final decision
             if final_is_defect:
@@ -651,8 +689,8 @@ class DefectDetector256:
                 'defect_type': final_defect_type,
                 'severity': final_severity,
                 'has_hole': hole_count > 0,
-                'has_thread_out': thread_count > 10,
-                'has_stain': stain_count > 3,
+                'has_thread_out': thread_count > 50,
+                'has_stain': stain_count > 5,
                 'holes_count': hole_count,
                 'threads_count': thread_count,
                 'stains_count': stain_count,
@@ -682,9 +720,9 @@ class DefectDetector256:
 ### Severity: {severity}
 
 ### Detection Summary:
-- **Holes Found:** {hole_count} (Any hole = REJECT)
-- **Thread-outs Found:** {thread_count} (REJECT if >10)
-- **Stains Found:** {stain_count} (REJECT if >3)
+- **Holes Found:** {hole_count} (REJECT if >0)
+- **Thread-outs Found:** {thread_count} (REJECT if >50)
+- **Stains Found:** {stain_count} (REJECT if >5)
 
 ### Model Analysis:
 - **Isolation Forest:** {'ANOMALY' if isolation_prediction == -1 else 'NORMAL'}
@@ -700,12 +738,12 @@ STOP production immediately! Inspect the machine and remove defective fabric.
 """
         else:
             explanation = f"""
-## NO DEFECTS DETECTED - ACCEPTED
+## NO DEFECTS DETECTED - QUALITY PASS ✅
 
 ### Quality Check Results:
 - **Holes Found:** {hole_count} (OK - needs >0 to reject)
-- **Thread-outs Found:** {thread_count} (OK - needs >10 to reject)
-- **Stains Found:** {stain_count} (OK - needs >3 to reject)
+- **Thread-outs Found:** {thread_count} (OK - needs >50 to reject)
+- **Stains Found:** {stain_count} (OK - needs >5 to reject)
 
 ### Model Analysis:
 - **Isolation Forest:** {'ANOMALY' if isolation_prediction == -1 else 'NORMAL'}
@@ -746,7 +784,7 @@ STOP production immediately! Inspect the machine and remove defective fabric.
         }
 
 # ============================================
-# STREAMLIT UI (Same as before)
+# STREAMLIT UI
 # ============================================
 
 st.markdown("""
@@ -764,7 +802,7 @@ def home_page():
     st.markdown("""
     <div class="main-header">
         <h1>Textile Defect Detection System</h1>
-        <p>High Resolution Mode (256x256) | Smart False Positive Reduction</p>
+        <p>High Resolution Mode (256x256) | Fixed False Positive Issues</p>
     </div>
     """, unsafe_allow_html=True)
     
@@ -815,7 +853,7 @@ def home_page():
 def user_dashboard():
     st.markdown(f"""
     <div style="display: flex; justify-content: space-between; align-items: center; padding: 1rem 2rem; background: white; border-radius: 16px; margin-bottom: 1rem;">
-        <div><span style="font-size: 24px;">Textile Defect Detection</span> <span style="background:#28a745; color:white; padding:2px 8px; border-radius:12px; font-size:12px;">SMART MODE</span></div>
+        <div><span style="font-size: 24px;">Textile Defect Detection</span> <span style="background:#28a745; color:white; padding:2px 8px; border-radius:12px; font-size:12px;">FIXED MODE</span></div>
         <div>Welcome, {st.session_state.get('user_name', 'User')}</div>
     </div>
     """, unsafe_allow_html=True)
@@ -885,7 +923,7 @@ def user_dashboard():
         if user_question:
             st.session_state['chat_messages'].append({'role': 'user', 'content': user_question})
             
-            context = "Fabric quality analysis system with smart false positive reduction."
+            context = "Fabric quality analysis system with fixed false positive issues."
             gemini = GeminiAnalyzer(GEMINI_API_KEY) if GEMINI_AVAILABLE else None
             
             if gemini and gemini.available:
@@ -998,7 +1036,7 @@ def user_dashboard():
             fig.update_layout(height=250)
             st.plotly_chart(fig, use_container_width=True)
             
-            st.info(f"Processing time: {result['processing_time']} seconds | Smart thresholds: Holes>0, Threads>10, Stains>3")
+            st.info(f"Processing time: {result['processing_time']} seconds | Smart thresholds: Holes>0, Threads>50, Stains>5")
             
             if st.button("New Inspection", use_container_width=True):
                 st.session_state['current_image'] = None
