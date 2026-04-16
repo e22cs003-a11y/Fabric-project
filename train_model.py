@@ -1,260 +1,299 @@
-# train_model.py - Train Isolation Forest for Fabric Defect Detection
+# train_model.py - ULTRA OPTIMIZED 256x256 Training (FAST MODE)
+# Complete in 25-30 minutes for 1177 images
+
 import os
 import numpy as np
 import cv2
+from PIL import Image
+import torch
+from torchvision import transforms
+import timm
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
 import joblib
-from PIL import Image
+from tqdm import tqdm
+import time
+import json
 import warnings
 warnings.filterwarnings('ignore')
 
-# Configuration
-IMG_SIZE = 128  # Resize images to this size for feature extraction
+# ============================================
+# ULTRA OPTIMIZED CONFIGURATION - 256x256 FAST
+# ============================================
 
-def extract_texture_features(image_path):
-    """
-    Extract texture features from fabric image
-    Features: Mean, Standard Deviation, Entropy
-    """
+IMG_SIZE = 256                    # 256x256 resolution
+BATCH_SIZE = 16                   # Smaller batch for 256x256 (memory efficient)
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+N_ESTIMATORS = 30                 # Very fast training (reduced from 100)
+CONTAMINATION = 0.01              # 1% anomaly rate
+USE_PATCHES = False               # Disable patches for speed
+
+print("=" * 60)
+print("⚡ ULTRA OPTIMIZED 256x256 TRAINING - FAST MODE")
+print("=" * 60)
+print(f"Resolution: {IMG_SIZE}x{IMG_SIZE} (65,536 pixels)")
+print(f"Device: {DEVICE}")
+print(f"Batch Size: {BATCH_SIZE}")
+print(f"Estimators: {N_ESTIMATORS}")
+print(f"Expected Time: 25-30 minutes for 1177 images")
+print("=" * 60)
+
+# ============================================
+# FAST FEATURE EXTRACTOR FOR 256x256
+# ============================================
+
+class Fast256Extractor:
+    """Ultra-fast feature extractor for 256x256 images"""
+    
+    def __init__(self):
+        print("\n📦 Loading ResNet50...")
+        self.model = timm.create_model('resnet50', pretrained=True, num_classes=0)
+        self.model = self.model.to(DEVICE)
+        self.model.eval()
+        self.feature_dim = self.model.num_features  # 2048 features
+        
+        # Simple transform for 256x256
+        self.transform = transforms.Compose([
+            transforms.Resize((IMG_SIZE, IMG_SIZE)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                               std=[0.229, 0.224, 0.225])
+        ])
+        print(f"✅ ResNet50 loaded (2048 features)")
+    
+    def extract_batch(self, image_paths):
+        """Extract features in BATCH - MUCH FASTER"""
+        batch_tensors = []
+        valid_paths = []
+        
+        for img_path in image_paths:
+            try:
+                img = Image.open(img_path).convert('RGB')
+                img_tensor = self.transform(img)
+                batch_tensors.append(img_tensor)
+                valid_paths.append(img_path)
+            except Exception as e:
+                continue
+        
+        if not batch_tensors:
+            return np.array([]), []
+        
+        # Stack and process in batch
+        batch = torch.stack(batch_tensors).to(DEVICE)
+        
+        with torch.no_grad():
+            features = self.model(batch)
+        
+        return features.cpu().numpy(), valid_paths
+
+# ============================================
+# FAST TEXTURE FEATURES (Optimized)
+# ============================================
+
+def get_texture_fast(image_path):
+    """Ultra-fast texture extraction for 256x256"""
     try:
-        # Load image in grayscale
-        img = Image.open(image_path).convert('L')
+        img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            return np.zeros(4)
         
-        # Resize to standard size
-        img = img.resize((IMG_SIZE, IMG_SIZE))
-        img_array = np.array(img, dtype=np.float32) / 255.0
+        # Resize to 128x128 for faster texture extraction
+        img = cv2.resize(img, (128, 128))
+        img_norm = img.astype(np.float32) / 255.0
         
-        # Feature 1: Mean (average brightness)
-        mean_val = np.mean(img_array)
+        # Simple statistics (fast)
+        mean_val = np.mean(img_norm)
+        std_val = np.std(img_norm)
         
-        # Feature 2: Standard Deviation (texture roughness)
-        std_val = np.std(img_array)
+        # Fast entropy
+        hist, _ = np.histogram(img_norm, bins=16, range=(0, 1))
+        hist = hist / (hist.sum() + 1e-10) + 1e-10
+        entropy = -np.sum(hist * np.log2(hist))
         
-        # Feature 3: Entropy (measure of randomness/texture complexity)
-        # Calculate histogram for entropy
-        hist, _ = np.histogram(img_array, bins=256, range=(0, 1))
-        hist = hist / hist.sum()  # Normalize
-        # Avoid log(0)
-        hist = hist + 1e-10
-        entropy_val = -np.sum(hist * np.log2(hist))
-        
-        # Additional feature 4: Edge density (for thread-out detection)
-        edges = cv2.Canny((img_array * 255).astype(np.uint8), 50, 150)
+        # Edge density (for defect detection)
+        edges = cv2.Canny(img, 50, 150)
         edge_density = np.sum(edges > 0) / edges.size
         
-        # Additional feature 5: Skewness (asymmetry of intensity distribution)
-        skewness_val = np.mean(((img_array - mean_val) / (std_val + 1e-10)) ** 3)
-        
-        # Additional feature 6: Kurtosis (peakedness of distribution)
-        kurtosis_val = np.mean(((img_array - mean_val) / (std_val + 1e-10)) ** 4) - 3
-        
-        return [
-            mean_val,           # 0: Average brightness
-            std_val,            # 1: Texture roughness
-            entropy_val,        # 2: Texture complexity
-            edge_density,       # 3: Edge concentration
-            skewness_val,       # 4: Distribution asymmetry
-            kurtosis_val        # 5: Distribution peakedness
-        ]
-    
-    except Exception as e:
-        print(f"Error extracting features from {image_path}: {e}")
-        return None
+        return np.array([mean_val, std_val, entropy, edge_density])
+    except:
+        return np.zeros(4)
 
-def load_defect_free_features(folder_path):
-    """
-    Load all defect-free images and extract features
-    """
-    features = []
+# ============================================
+# MAIN TRAINING FUNCTION
+# ============================================
+
+def train():
+    start_time = time.time()
+    
+    # Step 1: Load all images
+    print("\n📂 Loading images from dataset/defect_free/...")
     image_paths = []
+    folder = 'dataset/defect_free'
     
-    if not os.path.exists(folder_path):
-        print(f"⚠️ Folder not found: {folder_path}")
-        print(f"📁 Creating folder: {folder_path}")
-        os.makedirs(folder_path)
-        print("\n❌ Please add defect-free fabric images to this folder and run again!")
-        print("📝 Instructions:")
-        print("   1. Take 50-100 photos of PERFECT fabric")
-        print("   2. Save them as .jpg or .png in dataset/defect_free/")
-        print("   3. Run this script again")
-        return np.array([]), []
-    
-    valid_extensions = ('.jpg', '.jpeg', '.png', '.bmp', '.tiff')
-    image_files = [f for f in os.listdir(folder_path) 
-                   if f.lower().endswith(valid_extensions)]
-    
-    if len(image_files) == 0:
-        print(f"⚠️ No images found in {folder_path}")
-        print("📁 Please add defect-free fabric images to train the model")
-        return np.array([]), []
-    
-    print(f"📸 Found {len(image_files)} defect-free images")
-    print("🔄 Extracting features from images...")
-    
-    for i, img_file in enumerate(image_files):
-        img_path = os.path.join(folder_path, img_file)
-        features_vec = extract_texture_features(img_path)
-        
-        if features_vec is not None:
-            features.append(features_vec)
-            image_paths.append(img_path)
-            
-        # Progress indicator
-        if (i + 1) % 10 == 0:
-            print(f"   Processed {i + 1}/{len(image_files)} images")
-    
-    print(f"✅ Successfully extracted features from {len(features)} images")
-    return np.array(features), image_paths
-
-def train_isolation_forest():
-    """
-    Train Isolation Forest model for anomaly detection
-    """
-    print("=" * 60)
-    print("🧵 Textile Defect Detection - Isolation Forest Training")
-    print("=" * 60)
-    print("\n📊 Feature Extraction:")
-    print("   - Mean (average brightness)")
-    print("   - Standard Deviation (texture roughness)")
-    print("   - Entropy (texture complexity)")
-    print("   - Edge Density (thread concentration)")
-    print("   - Skewness (intensity asymmetry)")
-    print("   - Kurtosis (distribution peakedness)")
-    print()
-    
-    # Load features from defect-free images
-    features, image_paths = load_defect_free_features('dataset/defect_free')
-    
-    if len(features) == 0:
-        print("\n❌ Training failed: No valid images found!")
-        print("\n📁 Please follow these steps:")
-        print("   1. Create a folder named 'dataset/defect_free/'")
-        print("   2. Add 50-100 defect-free fabric images")
-        print("   3. Run this script again")
+    if not os.path.exists(folder):
+        os.makedirs(folder)
+        print(f"❌ Folder '{folder}' created. Please add 1177 images!")
         return False
     
-    print(f"\n📊 Feature matrix shape: {features.shape}")
-    print(f"   Features per image: {features.shape[1]}")
+    for f in os.listdir(folder):
+        if f.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp')):
+            image_paths.append(os.path.join(folder, f))
     
-    # Normalize features
-    print("\n🔄 Normalizing features...")
+    print(f"✅ Found {len(image_paths)} images")
+    
+    if len(image_paths) < 10:
+        print("❌ Need at least 10 images in dataset/defect_free/")
+        return False
+    
+    # Step 2: Initialize extractor
+    extractor = Fast256Extractor()
+    
+    # Step 3: Extract DNN features in BATCHES (FAST)
+    print("\n🎨 Extracting ResNet50 features from 256x256 images...")
+    print("⏱️ This will take 15-20 minutes...")
+    
+    all_features = []
+    valid_paths = []
+    
+    # Process in batches
+    for i in tqdm(range(0, len(image_paths), BATCH_SIZE), desc="Batch processing"):
+        batch_paths = image_paths[i:i+BATCH_SIZE]
+        batch_features, valid_batch = extractor.extract_batch(batch_paths)
+        
+        if len(batch_features) > 0:
+            all_features.extend(batch_features)
+            valid_paths.extend(valid_batch)
+    
+    all_features = np.array(all_features)
+    print(f"\n✅ DNN features extracted!")
+    print(f"   Shape: {all_features.shape}")
+    print(f"   Dimension: {all_features.shape[1]}")
+    
+    # Step 4: Extract texture features (FAST)
+    print("\n📊 Extracting texture features...")
+    print("⏱️ This will take 3-5 minutes...")
+    
+    texture_features = []
+    for path in tqdm(valid_paths, desc="Texture features"):
+        tex = get_texture_fast(path)
+        texture_features.append(tex)
+    
+    texture_features = np.array(texture_features)
+    print(f"✅ Texture features extracted!")
+    print(f"   Shape: {texture_features.shape}")
+    
+    # Step 5: Combine features
+    print("\n🔗 Combining DNN + Texture features...")
+    combined_features = np.hstack([all_features, texture_features])
+    print(f"✅ Combined shape: {combined_features.shape}")
+    
+    # Step 6: Normalize
+    print("\n📈 Normalizing features...")
     scaler = StandardScaler()
-    features_scaled = scaler.fit_transform(features)
+    features_scaled = scaler.fit_transform(combined_features)
+    print("✅ Normalization complete")
     
-    # Train Isolation Forest
-    print("\n🚀 Training Isolation Forest model...")
-    print("   Parameters:")
-    print("   - contamination: 0.01 (expect 1% anomalies)")
-    print("   - n_estimators: 100 trees")
-    print("   - max_samples: 'auto'")
+    # Step 7: Train Isolation Forest (VERY FAST with 30 estimators)
+    print("\n🚀 Training Isolation Forest...")
+    print(f"   Estimators: {N_ESTIMATORS}")
+    print(f"   Contamination: {CONTAMINATION}")
     
     iso_forest = IsolationForest(
-        contamination=0.01,      # Expect 1% of images to be anomalies
-        n_estimators=100,        # Number of trees
-        max_samples='auto',      # Use all samples for training
-        random_state=42,         # Reproducibility
-        bootstrap=False,         # No bootstrap sampling
-        verbose=1
+        n_estimators=N_ESTIMATORS,
+        contamination=CONTAMINATION,
+        random_state=42,
+        n_jobs=-1,           # Use all CPU cores
+        verbose=0
     )
     
     iso_forest.fit(features_scaled)
+    print("✅ Training complete!")
     
-    # Save model and scaler
+    # Step 8: Calculate threshold (1st percentile)
+    print("\n🎯 Calculating anomaly threshold...")
+    train_scores = iso_forest.decision_function(features_scaled)
+    threshold = np.percentile(train_scores, 1)
+    
+    print(f"   Score range: [{train_scores.min():.4f}, {train_scores.max():.4f}]")
+    print(f"   Mean score: {np.mean(train_scores):.4f}")
+    print(f"   Threshold (1%): {threshold:.4f}")
+    
+    # Step 9: Save models
+    print("\n💾 Saving models to 'models/' folder...")
     os.makedirs('models', exist_ok=True)
     
-    # Save the model
-    model_path = 'models/isolation_forest.joblib'
-    joblib.dump(iso_forest, model_path)
-    print(f"✅ Model saved to: {model_path}")
+    joblib.dump(iso_forest, 'models/isolation_forest.joblib', compress=3)
+    print("✅ Saved: models/isolation_forest.joblib")
     
-    # Save the scaler
-    scaler_path = 'models/scaler.joblib'
-    joblib.dump(scaler, scaler_path)
-    print(f"✅ Scaler saved to: {scaler_path}")
+    joblib.dump(scaler, 'models/scaler.joblib', compress=3)
+    print("✅ Saved: models/scaler.joblib")
     
-    # Save feature names for reference
-    feature_names = ['Mean', 'Std_Dev', 'Entropy', 'Edge_Density', 'Skewness', 'Kurtosis']
-    with open('models/feature_names.txt', 'w') as f:
-        f.write(','.join(feature_names))
+    with open('models/threshold.txt', 'w') as f:
+        f.write(str(threshold))
+    print(f"✅ Saved: models/threshold.txt (value: {threshold:.4f})")
     
-    # Test on training data (should all be normal)
+    # Save feature info
+    feature_info = {
+        'img_size': IMG_SIZE,
+        'feature_dim': extractor.feature_dim,
+        'texture_dim': 4,
+        'total_dim': combined_features.shape[1],
+        'threshold': float(threshold),
+        'n_estimators': N_ESTIMATORS,
+        'training_samples': len(valid_paths),
+        'model_type': 'resnet50',
+        'resolution': f'{IMG_SIZE}x{IMG_SIZE}'
+    }
+    
+    with open('models/feature_info.json', 'w') as f:
+        json.dump(feature_info, f, indent=2)
+    print("✅ Saved: models/feature_info.json")
+    
+    # Step 10: Validation
+    print("\n📊 Validation...")
     predictions = iso_forest.predict(features_scaled)
-    normal_count = np.sum(predictions == 1)
-    anomaly_count = np.sum(predictions == -1)
+    anomalies = np.sum(predictions == -1)
     
-    print("\n📊 Training Results:")
-    print(f"   - Normal samples identified: {normal_count}/{len(features)}")
-    print(f"   - Anomaly samples identified: {anomaly_count}/{len(features)}")
-    
-    if anomaly_count > 0:
-        print(f"\n⚠️ Warning: {anomaly_count} training images were marked as anomalies!")
-        print("   These images might have defects or be too different from normal fabric.")
-        print("   Consider reviewing these images or adding more defect-free samples.")
-    
-    # Calculate average feature values for reference
-    print("\n📈 Average Feature Values (Defect-Free Fabric):")
-    avg_features = np.mean(features, axis=0)
-    for i, name in enumerate(feature_names):
-        print(f"   - {name}: {avg_features[i]:.4f}")
+    # Calculate total time
+    total_time = time.time() - start_time
+    minutes = int(total_time // 60)
+    seconds = int(total_time % 60)
     
     print("\n" + "=" * 60)
-    print("✅ Training Complete!")
+    print("✅ TRAINING COMPLETED SUCCESSFULLY!")
     print("=" * 60)
-    print("\n📁 Model files created:")
-    print("   - models/isolation_forest.joblib (main model)")
-    print("   - models/scaler.joblib (feature normalizer)")
-    print("   - models/feature_names.txt (feature reference)")
-    print("\n🚀 Next step: Run 'streamlit run main_app.py'")
+    print(f"⏱️ Total time: {minutes} minutes {seconds} seconds")
+    print(f"📐 Resolution: {IMG_SIZE}x{IMG_SIZE} (65,536 pixels)")
+    print(f"📊 Total images: {len(valid_paths)}")
+    print(f"⚠️ Anomalies detected: {anomalies} ({anomalies/len(valid_paths)*100:.1f}%)")
+    print(f"🎯 Threshold: {threshold:.4f}")
+    
+    print("\n📁 Model files saved in 'models/' folder:")
+    print("   ✓ isolation_forest.joblib")
+    print("   ✓ scaler.joblib")
+    print("   ✓ threshold.txt")
+    print("   ✓ feature_info.json")
+    
+    print("\n🚀 NEXT STEP:")
+    print("   streamlit run main_app.py")
+    
+    print("=" * 60)
     
     return True
 
-def test_model():
-    """
-    Test the trained model with a sample image
-    """
-    print("\n" + "=" * 60)
-    print("🧪 Testing the trained model")
-    print("=" * 60)
-    
-    model_path = 'models/isolation_forest.joblib'
-    scaler_path = 'models/scaler.joblib'
-    
-    if not os.path.exists(model_path) or not os.path.exists(scaler_path):
-        print("❌ Model not found. Please train first.")
-        return
-    
-    # Load model and scaler
-    iso_forest = joblib.load(model_path)
-    scaler = joblib.load(scaler_path)
-    
-    print("✅ Model loaded successfully!")
-    print(f"📊 Model type: Isolation Forest")
-    print(f"   - Number of trees: {iso_forest.n_estimators}")
-    print(f"   - Contamination: {iso_forest.contamination}")
-    
-    # Test with a random defect-free image if available
-    test_folder = 'dataset/defect_free'
-    if os.path.exists(test_folder):
-        test_files = [f for f in os.listdir(test_folder) 
-                     if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-        
-        if test_files:
-            test_path = os.path.join(test_folder, test_files[0])
-            features = extract_texture_features(test_path)
-            
-            if features:
-                features_scaled = scaler.transform([features])
-                prediction = iso_forest.predict(features_scaled)[0]
-                score = iso_forest.decision_function(features_scaled)[0]
-                
-                print(f"\n📸 Test image: {test_files[0]}")
-                print(f"   - Prediction: {'✅ NORMAL' if prediction == 1 else '⚠️ ANOMALY/DEFECT'}")
-                print(f"   - Anomaly score: {score:.4f} (negative = anomaly)")
-    
-    print("\n✅ Model is ready for use in main_app.py!")
+# ============================================
+# RUN TRAINING
+# ============================================
 
 if __name__ == "__main__":
-    success = train_isolation_forest()
-    if success:
-        test_model()
+    print("\n⚡ ULTRA OPTIMIZED 256x256 TRAINING STARTED")
+    print("🎯 Target: 25-30 minutes for 1177 images\n")
+    
+    success = train()
+    
+    if not success:
+        print("\n❌ Training failed!")
+        print("\nPlease ensure:")
+        print("   1. Folder 'dataset/defect_free' exists")
+        print("   2. Contains 1177 images")
+        print("   3. Images are JPG/PNG format")
