@@ -1,6 +1,6 @@
 streamlit
 streamlit-oauth
-opencv-python
+opencv-python-headless
 numpy
 pandas
 plotly
@@ -11,3 +11,6 @@ joblib
 matplotlib
 scikit-image
 google-generativeai
+torch
+torchvision
+timm
