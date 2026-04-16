@@ -1,0 +1,11 @@
+{
+  "img_size": 256,
+  "feature_dim": 2048,
+  "texture_dim": 4,
+  "total_dim": 2052,
+  "threshold": 2.2090619264392153e-17,
+  "n_estimators": 30,
+  "training_samples": 1177,
+  "model_type": "resnet50",
+  "resolution": "256x256"
+}
