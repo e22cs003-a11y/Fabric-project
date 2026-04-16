@@ -1,1 +1,0 @@
-Mean,Std_Dev,Entropy,Edge_Density,Skewness,Kurtosis
