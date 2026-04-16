@@ -1,6 +1,6 @@
-opencv-python-headless
 streamlit
 streamlit-oauth
+opencv-python
 numpy
 pandas
 plotly
@@ -9,3 +9,5 @@ requests
 scikit-learn
 joblib
 matplotlib
+scikit-image
+google-generativeai
