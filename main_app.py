@@ -38,14 +38,16 @@ st.set_page_config(
 # For public GitHub/Streamlit Cloud, move these values to Streamlit Secrets.
 GEMINI_API_KEY = "AQ.Ab8RN6I3T-UXa9DN1NlW2E4WVemrMo5HsITXt6YyJLsVXuvqZg"
 
-CLIENT_ID = "930915758489-276a4s3f9rut5geq2sg39e4vom9316rh.apps.googleusercontent.com"
-CLIENT_SECRET = "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"
+# Google OAuth Configuration
+CLIENT_ID = "933775442031-8q1kjhsanunatshkm6cb220ekvardovb.apps.googleusercontent.com"
+CLIENT_SECRET = "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"
 AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 REFRESH_TOKEN_URL = "https://oauth2.googleapis.com/token"
 REVOKE_TOKEN_URL = "https://oauth2.googleapis.com/revoke"
-REDIRECT_URI = "http://localhost:8501"
+REDIRECT_URI = "https://fabric-project-csc.streamlit.app/"
 
+# Admin emails
 ADMINS = ["santhoshwebworker@gmail.com", "e22cs003@shanmugha.edu.in"]
 
 USERS_FILE = "users_data.json"
