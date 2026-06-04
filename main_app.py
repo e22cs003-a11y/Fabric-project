@@ -5,16 +5,15 @@ import os
 import json
 import time
 import warnings
+import hashlib
 from datetime import datetime
 
 import cv2
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-import requests
 import streamlit as st
 from PIL import Image
-from streamlit_oauth import OAuth2Component
 from ultralytics import YOLO
 
 warnings.filterwarnings("ignore")
@@ -38,16 +37,7 @@ st.set_page_config(
 # For public GitHub/Streamlit Cloud, move these values to Streamlit Secrets.
 GEMINI_API_KEY = "AQ.Ab8RN6I3T-UXa9DN1NlW2E4WVemrMo5HsITXt6YyJLsVXuvqZg"
 
-# Google OAuth Configuration
-CLIENT_ID = "933775442031-8q1kjhsanunatshkm6cb220ekvardovb.apps.googleusercontent.com"
-CLIENT_SECRET = "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"
-AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
-TOKEN_URL = "https://oauth2.googleapis.com/token"
-REFRESH_TOKEN_URL = "https://oauth2.googleapis.com/token"
-REVOKE_TOKEN_URL = "https://oauth2.googleapis.com/revoke"
-REDIRECT_URI = "https://fabric-project-csc.streamlit.app/"
 
-# Admin emails
 ADMINS = ["santhoshwebworker@gmail.com", "e22cs003@shanmugha.edu.in"]
 
 USERS_FILE = "users_data.json"
@@ -129,6 +119,76 @@ def get_user_reports(email):
 
 
 init_db()
+
+# ============================================
+# LOCAL AUTH HELPERS
+# ============================================
+
+def _normalize_email(email):
+    return (email or "").strip().lower()
+
+def hash_password(password):
+    return hashlib.sha256((password or "").encode("utf-8")).hexdigest()
+
+def register_user(name, email, password):
+    name = (name or "").strip()
+    email = _normalize_email(email)
+    password = password or ""
+
+    if not name or not email or not password:
+        return False, "Please fill all fields."
+
+    if len(password) < 6:
+        return False, "Password must be at least 6 characters."
+
+    users = get_all_users()
+
+    if email in users:
+        return False, "Account already exists. Please login."
+
+    users[email] = {
+        "name": name,
+        "email": email,
+        "password_hash": hash_password(password),
+        "role": "admin" if email in ADMINS else "user",
+        "created_at": datetime.now().isoformat(),
+        "auth_type": "local_email_password"
+    }
+
+    with open(USERS_FILE, "w", encoding="utf-8") as f:
+        json.dump(users, f, ensure_ascii=False, indent=2)
+
+    return True, "Register successful. Please login now."
+
+def login_user(email, password):
+    email = _normalize_email(email)
+    password = password or ""
+
+    if not email or not password:
+        return False, "Please enter email and password.", None
+
+    users = get_all_users()
+
+    if email not in users:
+        return False, "Account not found. Please register first.", None
+
+    user = users[email]
+
+    saved_hash = user.get("password_hash")
+    old_plain_password = user.get("password")
+
+    valid_password = False
+    if saved_hash and saved_hash == hash_password(password):
+        valid_password = True
+    elif old_plain_password and old_plain_password == password:
+        valid_password = True
+
+    if not valid_password:
+        return False, "Invalid password.", None
+
+    user["email"] = email
+    user["role"] = "admin" if email in ADMINS else user.get("role", "user")
+    return True, "Login successful.", user
 
 
 # ============================================
@@ -1449,6 +1509,9 @@ st.markdown(
 # ============================================
 
 def home_page():
+    if "auth_view" not in st.session_state:
+        st.session_state["auth_view"] = "login"
+
     st.markdown(
         """
         <div class="main-header">
@@ -1460,56 +1523,83 @@ def home_page():
         unsafe_allow_html=True
     )
 
-    col1, col2, col3 = st.columns([1, 2, 1])
+    col1, col2, col3 = st.columns([1, 1.35, 1])
 
     with col2:
-        st.markdown(
-            '<div style="text-align:center;color:white;"><h3>Sign In</h3></div>',
-            unsafe_allow_html=True
-        )
-
-        oauth2 = OAuth2Component(
-            CLIENT_ID,
-            CLIENT_SECRET,
-            AUTHORIZE_URL,
-            TOKEN_URL,
-            REFRESH_TOKEN_URL,
-            REVOKE_TOKEN_URL
-        )
-
-        result = oauth2.authorize_button(
-            name="Continue with Google",
-            icon="https://www.google.com/favicon.ico",
-            redirect_uri=REDIRECT_URI,
-            scope="openid email profile",
-            key="google_oauth",
-            use_container_width=True,
-        )
-
-        if result and "token" in result:
-            access_token = result["token"]["access_token"]
-            user_info_response = requests.get(
-                "https://www.googleapis.com/oauth2/v3/userinfo",
-                headers={"Authorization": f"Bearer {access_token}"}
+        if st.session_state["auth_view"] == "login":
+            st.markdown(
+                """
+                <div style="background:white;border-radius:24px;padding:2rem;box-shadow:0 14px 40px rgba(0,0,0,0.22);margin-bottom:1rem;text-align:center;">
+                    <div style="font-size:42px;margin-bottom:8px;">🔐</div>
+                    <h2 style="margin:0;color:#222;font-weight:900;">Login</h2>
+                    <p style="color:#666;margin-top:8px;margin-bottom:0;">Already have an account? Login to open dashboard.</p>
+                </div>
+                """,
+                unsafe_allow_html=True
             )
 
-            if user_info_response.status_code == 200:
-                user_info = user_info_response.json()
-                user_email = user_info.get("email", "")
-                user_name = user_info.get("name", user_email.split("@")[0])
+            if st.session_state.get("register_success_message"):
+                st.success(st.session_state.pop("register_success_message"))
 
-                user_data = {
-                    "email": user_email,
-                    "name": user_name,
-                    "role": "admin" if user_email in ADMINS else "user",
-                    "created_at": datetime.now().isoformat(),
-                }
-                save_user(user_data)
+            login_email = st.text_input("Email", key="login_email", placeholder="Enter your email")
+            login_password = st.text_input("Password", type="password", key="login_password", placeholder="Enter your password")
 
-                st.session_state["logged_in"] = True
-                st.session_state["user_email"] = user_email
-                st.session_state["user_name"] = user_name
-                st.session_state["user_role"] = user_data["role"]
+            if st.button("Login", type="primary", use_container_width=True):
+                ok, message, user = login_user(login_email, login_password)
+
+                if ok:
+                    st.session_state["logged_in"] = True
+                    st.session_state["user_email"] = user.get("email", _normalize_email(login_email))
+                    st.session_state["user_name"] = user.get("name", "User")
+                    st.session_state["user_role"] = user.get("role", "user")
+                    st.success(message)
+                    st.rerun()
+                else:
+                    st.error(message)
+
+            st.markdown(
+                """
+                <div style="text-align:center;color:white;margin-top:1rem;font-weight:600;">
+                    New user? Create your account below.
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+            if st.button("No account? Register", use_container_width=True):
+                st.session_state["auth_view"] = "register"
+                st.rerun()
+
+        else:
+            st.markdown(
+                """
+                <div style="background:white;border-radius:24px;padding:2rem;box-shadow:0 14px 40px rgba(0,0,0,0.22);margin-bottom:1rem;text-align:center;">
+                    <div style="font-size:42px;margin-bottom:8px;">📝</div>
+                    <h2 style="margin:0;color:#222;font-weight:900;">Register</h2>
+                    <p style="color:#666;margin-top:8px;margin-bottom:0;">Create an account first, then login to dashboard.</p>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+            reg_name = st.text_input("Full Name", key="reg_name", placeholder="Enter your full name")
+            reg_email = st.text_input("Email", key="reg_email", placeholder="Enter your email")
+            reg_password = st.text_input("Password", type="password", key="reg_password", placeholder="Minimum 6 characters")
+            reg_confirm = st.text_input("Confirm Password", type="password", key="reg_confirm", placeholder="Re-enter password")
+
+            if st.button("Register", type="primary", use_container_width=True):
+                if reg_password != reg_confirm:
+                    st.error("Password and confirm password do not match.")
+                else:
+                    ok, message = register_user(reg_name, reg_email, reg_password)
+                    if ok:
+                        st.session_state["auth_view"] = "login"
+                        st.session_state["register_success_message"] = "Registration successful. Please login now."
+                        st.rerun()
+                    else:
+                        st.error(message)
+
+            if st.button("Already have account? Login", use_container_width=True):
+                st.session_state["auth_view"] = "login"
                 st.rerun()
 
 # ============================================
@@ -1761,24 +1851,12 @@ def show_analysis(image):
     with c4:
         st.metric("Defect Free %", f"{scores.get('defect_free', 0) * 100:.0f}%")
 
-    # Detailed counts
-    with st.expander("🔴 Hole Details", expanded=len(holes) > 0):
-        if holes:
-            st.json(holes)
-        else:
-            st.success("No holes detected.")
-
-    with st.expander("🟢 Stain Details", expanded=len(stains) > 0):
-        if stains:
-            st.json(stains)
-        else:
-            st.success("No stains detected.")
-
-    with st.expander("🟠 Tear/Kilichu Details", expanded=len(tears) > 0):
-        if tears:
-            st.json(tears)
-        else:
-            st.success("No tear/kilichu detected.")
+    # Detailed JSON output hidden for professional UI.
+    st.markdown("## 📌 Detection Summary")
+    st.info(
+        f"Hole: {len(holes)} | Stain: {len(stains)} | Tear/Kilichu: {len(tears)} | "
+        f"Final Result: {final_result}"
+    )
 
     # Gauge
     fig = go.Figure(go.Indicator(
